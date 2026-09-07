@@ -586,6 +586,18 @@ func (cs *CameraStream) Bridge() *WebRTCBridge {
 	return cs.webrtcBridge
 }
 
+// withForwarder registers media on the current bridge while excluding replacement
+// and viewer removal. The forwarder itself rejects registration after Stop.
+func (cs *CameraStream) withForwarder(client *RTSPClient, register func(*RTPForwarder) error) error {
+	cs.mutex.Lock()
+	defer cs.mutex.Unlock()
+	bridge := cs.webrtcBridge
+	if cs.clients[client.session] != client || bridge == nil || bridge.ctx.Err() != nil {
+		return errors.New("RTSP stream is no longer available")
+	}
+	return register(bridge.rtpForwarder)
+}
+
 func (cs *CameraStream) startStream() {
 	cs.mutex.Lock()
 	if cs.active || !cs.connecting {

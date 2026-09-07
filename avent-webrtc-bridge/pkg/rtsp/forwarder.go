@@ -24,6 +24,7 @@ const (
 type RTPForwarder struct {
 	clients map[string]*RTPClient
 	mutex   sync.RWMutex
+	stopped bool
 
 	// RTP session info
 	videoSSRC uint32
@@ -93,6 +94,9 @@ func NewRTPForwarder() *RTPForwarder {
 func (rf *RTPForwarder) AddUDPClient(sessionID string, peerIP string, videoRTPPort, audioRTPPort int) error {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	if rf.stopped {
+		return fmt.Errorf("RTP forwarder is stopped")
+	}
 	// RTSP consumers normally run in another container/host. Send to the
 	// connected peer, never localhost or a client-supplied destination header.
 	if net.ParseIP(peerIP) == nil {
@@ -180,6 +184,9 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, peerIP string, videoRTPPo
 func (rf *RTPForwarder) SetupUDPBackchannel(sessionID string, clientPort int) (int, error) {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	if rf.stopped {
+		return 0, fmt.Errorf("RTP forwarder is stopped")
+	}
 
 	client, exists := rf.clients[sessionID]
 	if !exists {
@@ -223,6 +230,9 @@ func (rf *RTPForwarder) SetupUDPBackchannel(sessionID string, clientPort int) (i
 func (rf *RTPForwarder) AddTCPClient(sessionID string, conn net.Conn, videoRTPChannel, audioRTPChannel, backAudioRTPChannel byte) error {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	if rf.stopped {
+		return fmt.Errorf("RTP forwarder is stopped")
+	}
 
 	// Check if client already exists, update it
 	if existingClient, exists := rf.clients[sessionID]; exists {
@@ -473,6 +483,7 @@ func (rf *RTPForwarder) ForwardAudioPacket(packet *rtp.Packet) {
 func (rf *RTPForwarder) Stop() {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	rf.stopped = true
 	// Reset SSRCs
 	rf.videoSSRC = 0
 	rf.audioSSRC = 1

@@ -299,7 +299,6 @@ func (s *RTSPServer) handleDescribe(client *RTSPClient, request *RTSPRequest) {
 }
 
 func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
-	bridge := client.stream.Bridge()
 	transport := request.Headers["Transport"]
 	if transport == "" {
 		sendRTSPResponse(client.conn, 400, "Bad Request", nil, "Transport header missing")
@@ -370,8 +369,10 @@ func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 			rtpChannel, rtcpChannel)
 
 		// For TCP, add/update client after each setup
-		err := bridge.rtpForwarder.AddTCPClient(client.session, client.conn,
-			client.videoRTPChannel, client.audioRTPChannel, client.backAudioRTPChannel)
+		err := client.stream.withForwarder(client, func(forwarder *RTPForwarder) error {
+			return forwarder.AddTCPClient(client.session, client.conn,
+				client.videoRTPChannel, client.audioRTPChannel, client.backAudioRTPChannel)
+		})
 		if err != nil {
 			core.Logger.Error().Err(err).Msg("Error adding TCP RTP client")
 			sendRTSPResponse(client.conn, 500, "Internal Server Error", nil,
@@ -414,18 +415,20 @@ func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 			core.Logger.Trace().Msgf("Setup audio track - Client RTP port: %d, RTCP port: %d", clientRTPPort, clientRTCPPort)
 		} else if isBackchannel {
 			// For backchannel, setup the server listener and get actual server port
-			if bridge != nil {
-				port, err := bridge.rtpForwarder.SetupUDPBackchannel(
-					client.session, clientRTPPort)
-				if err != nil {
-					core.Logger.Error().Err(err).Msg("Failed to setup UDP backchannel")
-					sendRTSPResponse(client.conn, 500, "Internal Server Error", nil,
-						"Failed to setup backchannel")
-					return
-				}
-				client.backAudioRTPPort = port
-				client.backAudioRTCPPort = port + 1
+			var port int
+			err := client.stream.withForwarder(client, func(forwarder *RTPForwarder) error {
+				var err error
+				port, err = forwarder.SetupUDPBackchannel(client.session, clientRTPPort)
+				return err
+			})
+			if err != nil {
+				core.Logger.Error().Err(err).Msg("Failed to setup UDP backchannel")
+				sendRTSPResponse(client.conn, 500, "Internal Server Error", nil,
+					"Failed to setup backchannel")
+				return
 			}
+			client.backAudioRTPPort = port
+			client.backAudioRTCPPort = port + 1
 			core.Logger.Trace().Msgf("Setup backchannel track - Client RTP port: %d, Server RTP port: %d", clientRTPPort, client.backAudioRTPPort)
 		}
 
@@ -450,8 +453,10 @@ func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 				sendRTSPResponse(client.conn, 461, "Unsupported Transport", nil, "")
 				return
 			}
-			err = bridge.rtpForwarder.AddUDPClient(client.session, peerIP,
-				client.videoRTPPort, client.audioRTPPort)
+			err = client.stream.withForwarder(client, func(forwarder *RTPForwarder) error {
+				return forwarder.AddUDPClient(client.session, peerIP,
+					client.videoRTPPort, client.audioRTPPort)
+			})
 			if err != nil {
 				core.Logger.Error().Err(err).Msg("Error adding UDP RTP client")
 				sendRTSPResponse(client.conn, 500, "Internal Server Error", nil,
