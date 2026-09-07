@@ -5,6 +5,7 @@ import (
 	"avent-webrtc-bridge/pkg/utils"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -89,9 +90,14 @@ func NewRTPForwarder() *RTPForwarder {
 	}
 }
 
-func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPort int) error {
+func (rf *RTPForwarder) AddUDPClient(sessionID string, peerIP string, videoRTPPort, audioRTPPort int) error {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	// RTSP consumers normally run in another container/host. Send to the
+	// connected peer, never localhost or a client-supplied destination header.
+	if net.ParseIP(peerIP) == nil {
+		return fmt.Errorf("invalid RTSP peer IP")
+	}
 
 	// Check if client already exists
 	if client, exists := rf.clients[sessionID]; exists {
@@ -102,14 +108,14 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPor
 
 		// Create new connections if needed
 		if videoRTPPort > 0 && client.videoConn == nil {
-			videoAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", videoRTPPort))
+			videoAddr, _ := net.ResolveUDPAddr("udp", net.JoinHostPort(peerIP, strconv.Itoa(videoRTPPort)))
 			videoConn, _ := net.DialUDP("udp", nil, videoAddr)
 			client.videoAddr = videoAddr
 			client.videoConn = videoConn
 		}
 
 		if audioRTPPort > 0 && client.audioConn == nil {
-			audioAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", audioRTPPort))
+			audioAddr, _ := net.ResolveUDPAddr("udp", net.JoinHostPort(peerIP, strconv.Itoa(audioRTPPort)))
 			audioConn, _ := net.DialUDP("udp", nil, audioAddr)
 			client.audioAddr = audioAddr
 			client.audioConn = audioConn
@@ -128,7 +134,7 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPor
 
 	// Create video connection if port provided
 	if videoRTPPort > 0 {
-		videoAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", videoRTPPort))
+		videoAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(peerIP, strconv.Itoa(videoRTPPort)))
 		if err != nil {
 			return fmt.Errorf("failed to resolve video UDP address: %v", err)
 		}
@@ -144,7 +150,7 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPor
 
 	// Create audio connection if port provided
 	if audioRTPPort > 0 {
-		audioAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", audioRTPPort))
+		audioAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(peerIP, strconv.Itoa(audioRTPPort)))
 		if err != nil {
 			if client.videoConn != nil {
 				client.videoConn.Close()

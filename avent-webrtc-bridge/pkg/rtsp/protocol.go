@@ -445,7 +445,12 @@ func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 
 		// Add/update UDP client with current ports after video and audio setup
 		if isVideoTrack || isAudioTrack {
-			err := bridge.rtpForwarder.AddUDPClient(client.session,
+			peerIP, _, err := net.SplitHostPort(client.conn.RemoteAddr().String())
+			if err != nil {
+				sendRTSPResponse(client.conn, 461, "Unsupported Transport", nil, "")
+				return
+			}
+			err = bridge.rtpForwarder.AddUDPClient(client.session, peerIP,
 				client.videoRTPPort, client.audioRTPPort)
 			if err != nil {
 				core.Logger.Error().Err(err).Msg("Error adding UDP RTP client")
