@@ -9,7 +9,7 @@ FROM source AS test
 RUN --mount=type=cache,target=/root/.cache/go-build \
     test -z "$(gofmt -l .)" && \
     go test -race -count=1 -timeout 120s ./... && \
-    go test -race -count=20 -timeout 120s -run '^Test(Stop|Repeated|Concurrent|FailedStart|DisconnectThen|Error|Negotiation|Stale|Negotiating|MQTT|Waiter|UDP)' ./pkg/rtsp ./pkg/tuya ./pkg/utils && \
+    go test -race -count=20 -timeout 120s -run '^Test(Stop|Repeated|Concurrent|FailedStart|DisconnectThen|Error|Negotiation|Stale|Negotiating|MQTT|Waiter|UDP|Registration|Startup|Interleaved)' ./pkg/rtsp ./pkg/tuya ./pkg/utils && \
     go vet ./...
 
 FROM test AS builder
