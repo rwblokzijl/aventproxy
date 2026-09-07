@@ -588,6 +588,7 @@ func (rf *RTPForwarder) sendInterleavedRTP(conn net.Conn, channel byte, rtpData 
 	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		return err
 	}
+	defer conn.SetWriteDeadline(time.Time{})
 	if _, err := conn.Write(fullPacket); err != nil {
 		_ = conn.Close()
 		return err
