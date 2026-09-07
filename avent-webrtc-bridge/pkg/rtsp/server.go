@@ -643,8 +643,10 @@ func (cs *CameraStream) startStream() {
 			err = errors.New("camera disconnected during stream startup")
 		}
 		if err == nil {
-			cs.connecting = false
-			cs.active = true
+			if !cs.activateStreamLocked() {
+				cs.mutex.Unlock()
+				return
+			}
 			if attempt > 1 {
 				// SETUP may have registered consumers on the failed peer's RTP
 				// forwarder. Reconnect them to this now-active replacement.
@@ -666,6 +668,18 @@ func (cs *CameraStream) startStream() {
 	// Exhausted startup retries must close RTSP consumers too, so a client does
 	// not remain attached forever to a failed session with no media.
 	cs.handleBridgeError(errors.New("stream startup retries exhausted"))
+}
+
+// activateStreamLocked publishes a successful startup only while viewers remain.
+// The caller holds cs.mutex so RemoveClient cannot race with activation.
+func (cs *CameraStream) activateStreamLocked() bool {
+	if len(cs.clients) == 0 {
+		cs.stopStreamInternal()
+		return false
+	}
+	cs.connecting = false
+	cs.active = true
+	return true
 }
 
 func (cs *CameraStream) stopStream() {
