@@ -165,7 +165,7 @@ func (wb *WebRTCBridge) Start() (err error) {
 			mqttClientID := wb.mobileClient.DeriveMQTTClientID(uid)
 			subscribeTopic := fmt.Sprintf("/av/u/%s", uid)
 
-			wb.mqttClient, err = tuya.NewMobileMqttClient(&tuya.MobileMQTTConfig{
+			wb.mqttClient, err = tuya.NewMobileMqttClientContext(wb.ctx, &tuya.MobileMQTTConfig{
 				Username:       mqttUsername,
 				Password:       mqttDerived.Password,
 				ClientID:       mqttClientID,
@@ -211,7 +211,7 @@ func (wb *WebRTCBridge) Start() (err error) {
 			return fmt.Errorf("failed to get WebRTC config: %v", err)
 		}
 
-		wb.mqttClient, err = tuya.NewMqttClient(
+		wb.mqttClient, err = tuya.NewMqttClientContext(wb.ctx,
 			clientId,
 			mobileMqttsUrl,
 			&mqttConfig.Result,

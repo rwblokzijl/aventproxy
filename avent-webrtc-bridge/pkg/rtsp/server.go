@@ -140,7 +140,7 @@ func (s *RTSPServer) Start() error {
 	s.running = true
 
 	if s.MobileClient != nil {
-		s.mqttManager = NewMQTTManager(s.MobileClient)
+		s.mqttManager = NewMQTTManager(s.ctx, s.MobileClient)
 	}
 
 	core.Logger.Info().Msgf("RTSP Server started on port %d", s.port)
@@ -637,7 +637,7 @@ func (cs *CameraStream) startStream() {
 		var err error
 		if cs.server != nil && cs.server.mqttManager != nil {
 			var client *tuya.MQTTClient
-			client, err = cs.server.mqttManager.GetClient(cs.camera.DeviceID)
+			client, err = cs.server.mqttManager.GetClient(cs.server.ctx, cs.camera.DeviceID)
 			if err == nil {
 				bridge.SetMQTTClient(client)
 			}

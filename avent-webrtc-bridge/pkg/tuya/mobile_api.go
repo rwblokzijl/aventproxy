@@ -1,6 +1,7 @@
 package tuya
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/sha256"
@@ -164,7 +165,13 @@ func (c *MobileSDKClient) buildParams(action, version string, postData interface
 	return params
 }
 
+// Call sends a signed API request with the default HTTP timeout.
 func (c *MobileSDKClient) Call(action, version string, postData interface{}) (json.RawMessage, error) {
+	return c.CallContext(context.Background(), action, version, postData)
+}
+
+// CallContext propagates cancellation through request dispatch and response reading.
+func (c *MobileSDKClient) CallContext(ctx context.Context, action, version string, postData interface{}) (json.RawMessage, error) {
 	params := c.buildParams(action, version, postData)
 
 	form := url.Values{}
@@ -172,7 +179,7 @@ func (c *MobileSDKClient) Call(action, version string, postData interface{}) (js
 		form.Set(k, v)
 	}
 
-	req, err := http.NewRequest("POST", c.BaseURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -276,8 +283,14 @@ func (c *MobileSDKClient) DeriveMQTTClientID(uid string) string {
 	return fmt.Sprintf("%s_mb_%s_%s_DEFAULT", pkg, c.DeviceID, uidHash)
 }
 
+// GetUserInfo fetches account metadata using the default HTTP timeout.
 func (c *MobileSDKClient) GetUserInfo() (*UserInfoResult, error) {
-	raw, err := c.Call("smartlife.m.user.info.get", "1.0", nil)
+	return c.GetUserInfoContext(context.Background())
+}
+
+// GetUserInfoContext makes broker discovery cancellable with its owning session.
+func (c *MobileSDKClient) GetUserInfoContext(ctx context.Context) (*UserInfoResult, error) {
+	raw, err := c.CallContext(ctx, "smartlife.m.user.info.get", "1.0", nil)
 	if err != nil {
 		return nil, err
 	}

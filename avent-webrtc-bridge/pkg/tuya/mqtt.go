@@ -24,6 +24,8 @@ type MQTTClient struct {
 	stopOnce       sync.Once
 	camerasMutex   sync.RWMutex
 	Connected      utils.Waiter
+	stopCtx        context.Context
+	cancel         context.CancelFunc
 }
 
 type MqttFrameHeader struct {
@@ -50,11 +52,23 @@ type MqttMessage struct {
 	Data     MqttFrame `json:"data"`
 }
 
+// NewMqttClient opens a web MQTT session with bounded default handshake waits.
 func NewMqttClient(clientId, mobileMqttsUrl string, mqttConfig *MQTConfig) (*MQTTClient, error) {
+	return NewMqttClientContext(context.Background(), clientId, mobileMqttsUrl, mqttConfig)
+}
+
+// NewMqttClientContext permits cancellation while the web MQTT connection is opening.
+func NewMqttClientContext(ctx context.Context, clientId, mobileMqttsUrl string, mqttConfig *MQTConfig) (*MQTTClient, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stopCtx, cancel := context.WithCancel(context.Background())
 	client := &MQTTClient{
 		uid:            mqttConfig.Msid,
 		subscribeTopic: fmt.Sprintf("/av/u/%s", mqttConfig.Msid),
 		Connected:      utils.Waiter{},
+		stopCtx:        stopCtx,
+		cancel:         cancel,
 	}
 
 	wssUrl := fmt.Sprintf("wss://%s/mqtt", mobileMqttsUrl)
@@ -74,7 +88,7 @@ func NewMqttClient(clientId, mobileMqttsUrl string, mqttConfig *MQTConfig) (*MQT
 	opts.SetCleanSession(true)
 
 	client.mqtt = mqtt.NewClient(opts)
-	if err := waitMQTTToken(client.mqtt.Connect(), 15*time.Second); err != nil {
+	if err := waitMQTTTokenContext(ctx, client.mqtt.Connect(), 15*time.Second); err != nil {
 		client.Stop()
 		return nil, err
 	}
@@ -91,11 +105,23 @@ type MobileMQTTConfig struct {
 	BrokerURL      string
 }
 
+// NewMobileMqttClient opens a mobile MQTT session with bounded default waits.
 func NewMobileMqttClient(config *MobileMQTTConfig) (*MQTTClient, error) {
+	return NewMobileMqttClientContext(context.Background(), config)
+}
+
+// NewMobileMqttClientContext cancels the connect-token wait with its caller.
+func NewMobileMqttClientContext(ctx context.Context, config *MobileMQTTConfig) (*MQTTClient, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stopCtx, cancel := context.WithCancel(context.Background())
 	client := &MQTTClient{
 		uid:            config.UID,
 		subscribeTopic: config.SubscribeTopic,
 		Connected:      utils.Waiter{},
+		stopCtx:        stopCtx,
+		cancel:         cancel,
 	}
 
 	opts := mqtt.NewClientOptions()
@@ -114,7 +140,7 @@ func NewMobileMqttClient(config *MobileMQTTConfig) (*MQTTClient, error) {
 	opts.SetTLSConfig(tlsConfig)
 
 	client.mqtt = mqtt.NewClient(opts)
-	if err := waitMQTTToken(client.mqtt.Connect(), 15*time.Second); err != nil {
+	if err := waitMQTTTokenContext(ctx, client.mqtt.Connect(), 15*time.Second); err != nil {
 		client.Stop()
 		return nil, err
 	}
@@ -125,6 +151,10 @@ func NewMobileMqttClient(config *MobileMQTTConfig) (*MQTTClient, error) {
 func (c *MQTTClient) Stop() {
 	c.stopOnce.Do(func() {
 		c.closed.Store(true)
+		if c.cancel != nil {
+			c.cancel()
+		}
+		c.Connected.Done(context.Canceled)
 		if c.mqtt != nil {
 			c.mqtt.Disconnect(250)
 		}
@@ -157,7 +187,7 @@ func (c *MQTTClient) onConnect(client mqtt.Client) {
 	core.Logger.Trace().Msgf("Connected to mqtt broker")
 	core.Logger.Trace().Msgf("Subscribing to topic: %s", c.subscribeTopic)
 
-	if err := waitMQTTToken(client.Subscribe(c.subscribeTopic, 1, c.consume), 10*time.Second); err != nil {
+	if err := waitMQTTTokenContext(c.stopCtx, client.Subscribe(c.subscribeTopic, 1, c.consume), 10*time.Second); err != nil {
 		c.Connected.Done(err)
 		return
 	}
@@ -202,11 +232,21 @@ func (c *MQTTClient) consume(client mqtt.Client, msg mqtt.Message) {
 	}
 }
 
+// waitMQTTToken bounds acknowledgements for legacy callers without a context.
 func waitMQTTToken(token mqtt.Token, timeout time.Duration) error {
-	if !token.WaitTimeout(timeout) {
-		return errors.New("MQTT acknowledgement timed out")
+	return waitMQTTTokenContext(context.Background(), token, timeout)
+}
+
+// waitMQTTTokenContext waits directly on token completion without spawning waiters.
+func waitMQTTTokenContext(parent context.Context, token mqtt.Token, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-token.Done():
+		return token.Error()
 	}
-	return token.Error()
 }
 
 func (c *MQTTClient) WaitConnected(parent context.Context) error {
