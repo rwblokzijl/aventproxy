@@ -1,0 +1,11 @@
+**
+!avent-webrtc-bridge/
+!avent-webrtc-bridge/**
+!aventproxy-bridge-addon/
+!aventproxy-bridge-addon/run.sh
+!docker/
+!docker/Dockerfile.bridge
+**/.tuya-data
+**/.git
+**/*.secret
+**/*bridge*.json
