@@ -14,6 +14,7 @@ import (
 	pion "github.com/pion/webrtc/v4"
 )
 
+// newPartialBridge gathers real local ICE sockets without contacting a camera.
 func newPartialBridge(t *testing.T) *WebRTCBridge {
 	t.Helper()
 	bridge := NewWebRTCBridge(&storage.CameraInfo{DeviceName: "Test camera"}, "hd", nil, nil)
@@ -41,6 +42,7 @@ func newPartialBridge(t *testing.T) *WebRTCBridge {
 	return bridge
 }
 
+// TestStopClosesNeverConnectedPeer covers cleanup before media becomes connected.
 func TestStopClosesNeverConnectedPeer(t *testing.T) {
 	bridge := newPartialBridge(t)
 	bridge.Stop()
@@ -53,6 +55,7 @@ func TestStopClosesNeverConnectedPeer(t *testing.T) {
 	bridge.Stop() // Idempotent, even after a partial start.
 }
 
+// TestRepeatedFailedPeersDoNotLeakDescriptors measures Linux descriptors across failed sessions.
 func TestRepeatedFailedPeersDoNotLeakDescriptors(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux descriptor accounting")
@@ -78,6 +81,7 @@ func TestRepeatedFailedPeersDoNotLeakDescriptors(t *testing.T) {
 	}
 }
 
+// TestConcurrentStopIsSafe exercises idempotent teardown from concurrent owners.
 func TestConcurrentStopIsSafe(t *testing.T) {
 	bridge := newPartialBridge(t)
 	var wg sync.WaitGroup
@@ -90,6 +94,7 @@ func TestConcurrentStopIsSafe(t *testing.T) {
 	}
 }
 
+// TestFailedStartCleansAllocatedResources covers Start's error cleanup and single-use contract.
 func TestFailedStartCleansAllocatedResources(t *testing.T) {
 	bridge := newPartialBridge(t)
 	// Missing login state makes the real Start error path fail before an offer.
@@ -104,6 +109,7 @@ func TestFailedStartCleansAllocatedResources(t *testing.T) {
 	}
 }
 
+// TestDisconnectThenStopClosesPeer covers cleanup after readiness has already fallen false.
 func TestDisconnectThenStopClosesPeer(t *testing.T) {
 	bridge := newPartialBridge(t)
 	bridge.connected.Store(true)
@@ -114,6 +120,7 @@ func TestDisconnectThenStopClosesPeer(t *testing.T) {
 	}
 }
 
+// TestErrorCompletesNegotiationWithoutCallback preserves failure delivery for standalone bridges.
 func TestErrorCompletesNegotiationWithoutCallback(t *testing.T) {
 	bridge := NewWebRTCBridge(&storage.CameraInfo{}, "hd", nil, nil)
 	want := errors.New("camera disconnected")
@@ -123,6 +130,7 @@ func TestErrorCompletesNegotiationWithoutCallback(t *testing.T) {
 	}
 }
 
+// TestErrorCallbackDoesNotBlockSignaling holds the owner callback while signaling returns.
 func TestErrorCallbackDoesNotBlockSignaling(t *testing.T) {
 	bridge := NewWebRTCBridge(&storage.CameraInfo{}, "hd", nil, nil)
 	entered, release, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
@@ -141,6 +149,7 @@ func TestErrorCallbackDoesNotBlockSignaling(t *testing.T) {
 	}
 }
 
+// TestNegotiationTimeoutAndCancellation bounds negotiation and prevents Stop/Start deadlocks.
 func TestNegotiationTimeoutAndCancellation(t *testing.T) {
 	t.Run("timeout", func(t *testing.T) {
 		bridge := NewWebRTCBridge(&storage.CameraInfo{}, "hd", nil, nil)
@@ -167,6 +176,7 @@ func TestNegotiationTimeoutAndCancellation(t *testing.T) {
 	})
 }
 
+// TestStaleBridgeErrorCannotStopReplacement rejects failure callbacks from retired sessions.
 func TestStaleBridgeErrorCannotStopReplacement(t *testing.T) {
 	_, stream := newTestCameraStream(t)
 	old := stream.webrtcBridge
@@ -181,6 +191,7 @@ func TestStaleBridgeErrorCannotStopReplacement(t *testing.T) {
 	stream.Stop()
 }
 
+// TestNegotiatingBridgeErrorLeavesRetryOwnerInControl preserves Start's retry ownership.
 func TestNegotiatingBridgeErrorLeavesRetryOwnerInControl(t *testing.T) {
 	_, stream := newTestCameraStream(t)
 	stream.connecting = true

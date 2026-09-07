@@ -76,6 +76,7 @@ type WebRTCBridge struct {
 	OnError       func(error)
 }
 
+// NewWebRTCBridge allocates a single-use camera session without opening connections.
 func NewWebRTCBridge(camera *storage.CameraInfo, streamResolution string, user *storage.UserSession, storageManager *storage.StorageManager) *WebRTCBridge {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -99,12 +100,14 @@ func (wb *WebRTCBridge) SetMobileClient(client *tuya.MobileSDKClient) {
 	wb.mobileClient = client
 }
 
+// SetMQTTClient supplies a shared MQTT session that bridge teardown must not close.
 func (wb *WebRTCBridge) SetMQTTClient(client *tuya.MQTTClient) {
 	wb.mutex.Lock()
 	defer wb.mutex.Unlock()
 	wb.mqttClient = client
 }
 
+// Start negotiates media with bounded waits and cleans every partially failed session.
 func (wb *WebRTCBridge) Start() (err error) {
 	wb.mutex.Lock()
 	defer wb.mutex.Unlock()
@@ -277,6 +280,7 @@ func (wb *WebRTCBridge) Start() (err error) {
 	return nil
 }
 
+// Stop cancels negotiation and releases resources even if media never connected.
 func (wb *WebRTCBridge) Stop() {
 	// Wake a negotiating Start before waiting for its resource lock.
 	wb.cancel()
@@ -285,12 +289,14 @@ func (wb *WebRTCBridge) Stop() {
 	wb.stopLocked()
 }
 
+// waitForConnection bounds media negotiation by both a deadline and bridge cancellation.
 func (wb *WebRTCBridge) waitForConnection(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(wb.ctx, timeout)
 	defer cancel()
 	return wb.waiter.WaitContext(ctx)
 }
 
+// stopLocked performs idempotent resource cleanup while the bridge mutex is held.
 func (wb *WebRTCBridge) stopLocked() {
 	if wb.stopped {
 		return
@@ -328,6 +334,7 @@ func (wb *WebRTCBridge) stopLocked() {
 	core.Logger.Info().Msgf("WebRTC bridge stopped for camera: %s", wb.camera.DeviceName)
 }
 
+// IsConnected reports media readiness without taking the negotiation resource lock.
 func (wb *WebRTCBridge) IsConnected() bool {
 	return wb.connected.Load()
 }
@@ -338,6 +345,7 @@ func (wb *WebRTCBridge) ForwardBackchannelAudioPacket(packet *rtp.Packet) {
 	}
 }
 
+// setupPeerConnection configures codecs, ICE and callbacks for this camera session.
 func (wb *WebRTCBridge) setupPeerConnection(webRTCConfig *tuya.WebRTCConfig) error {
 	// Convert ICE servers
 	iceServerBytes, err := json.Marshal(webRTCConfig.P2PConfig.Ices)
@@ -483,6 +491,7 @@ func (wb *WebRTCBridge) setupPeerConnection(webRTCConfig *tuya.WebRTCConfig) err
 	return nil
 }
 
+// setupMQTTCameraClient serializes answer/candidate handling and drops canceled signaling.
 func (wb *WebRTCBridge) setupMQTTCameraClient(webRTCConfig *tuya.WebRTCConfig) {
 	device := &tuya.Device{
 		DeviceId:   wb.camera.DeviceID,
@@ -672,6 +681,7 @@ func (wb *WebRTCBridge) handleAudioTrack(track *pion.TrackRemote) {
 	}
 }
 
+// createHTTPClient restores legacy session cookies, or returns nil without login state.
 func (wb *WebRTCBridge) createHTTPClient() *http.Client {
 	if wb.user == nil || wb.user.SessionData == nil {
 		return nil
@@ -759,12 +769,14 @@ func (wb *WebRTCBridge) sendMessageToDataChannel(message []byte) error {
 	return nil
 }
 
+// SetErrorHandler safely replaces the stream owner's asynchronous failure callback.
 func (wb *WebRTCBridge) SetErrorHandler(handler func(error)) {
 	wb.callbackMutex.Lock()
 	defer wb.callbackMutex.Unlock()
 	wb.OnError = handler
 }
 
+// handleError completes negotiation and notifies the owner without blocking signaling.
 func (wb *WebRTCBridge) handleError(err error) {
 	// Always finish negotiation, including standalone bridges without a callback.
 	wb.waiter.Done(err)

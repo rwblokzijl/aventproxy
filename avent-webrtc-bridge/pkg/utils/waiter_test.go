@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// TestWaiterCompletionAndCancellation preserves one result for concurrent and late waiters.
 func TestWaiterCompletionAndCancellation(t *testing.T) {
 	want := errors.New("handshake failed")
 	for range 100 {
@@ -39,6 +40,7 @@ func TestWaiterCompletionAndCancellation(t *testing.T) {
 	}
 }
 
+// TestWaiterMultipleTasks waits for the final registered task before terminal completion.
 func TestWaiterMultipleTasks(t *testing.T) {
 	var w Waiter
 	w.Add(2)

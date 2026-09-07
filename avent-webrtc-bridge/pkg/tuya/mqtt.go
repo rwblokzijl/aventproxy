@@ -148,6 +148,7 @@ func NewMobileMqttClientContext(ctx context.Context, config *MobileMQTTConfig) (
 	return client, nil
 }
 
+// Stop cancels subscription waiters and disconnects this MQTT session at most once.
 func (c *MQTTClient) Stop() {
 	c.stopOnce.Do(func() {
 		c.closed.Store(true)
@@ -161,10 +162,12 @@ func (c *MQTTClient) Stop() {
 	})
 }
 
+// IsConnected combines transport readiness with the session's terminal closed state.
 func (c *MQTTClient) IsConnected() bool {
 	return c.mqtt != nil && c.mqtt.IsConnected() && !c.closed.Load()
 }
 
+// AddCameraClient safely registers a signaling recipient for a camera session.
 func (c *MQTTClient) AddCameraClient(sessionId string, cameraClient *MQTTCameraClient) {
 	c.camerasMutex.Lock()
 	defer c.camerasMutex.Unlock()
@@ -174,6 +177,7 @@ func (c *MQTTClient) AddCameraClient(sessionId string, cameraClient *MQTTCameraC
 	c.cameras[sessionId] = cameraClient
 }
 
+// RemoveCameraClient safely unregisters a camera during signaling or teardown.
 func (c *MQTTClient) RemoveCameraClient(sessionId string) {
 	c.camerasMutex.Lock()
 	defer c.camerasMutex.Unlock()
@@ -183,6 +187,7 @@ func (c *MQTTClient) RemoveCameraClient(sessionId string) {
 	delete(c.cameras, sessionId)
 }
 
+// onConnect completes readiness only after a bounded, stoppable subscription handshake.
 func (c *MQTTClient) onConnect(client mqtt.Client) {
 	core.Logger.Trace().Msgf("Connected to mqtt broker")
 	core.Logger.Trace().Msgf("Subscribing to topic: %s", c.subscribeTopic)
@@ -196,6 +201,7 @@ func (c *MQTTClient) onConnect(client mqtt.Client) {
 	c.Connected.Done(nil)
 }
 
+// onDisconnect publishes handshake failure and marks the session permanently closed.
 func (c *MQTTClient) onDisconnect(client mqtt.Client, err error) {
 	if err != nil {
 		c.Connected.Done(err)
@@ -206,6 +212,7 @@ func (c *MQTTClient) onDisconnect(client mqtt.Client, err error) {
 	c.closed.Store(true)
 }
 
+// consume snapshots a registered recipient before dispatching camera signaling without a map lock.
 func (c *MQTTClient) consume(client mqtt.Client, msg mqtt.Message) {
 	var rmqtt MqttMessage
 	if err := json.Unmarshal(msg.Payload(), &rmqtt); err != nil {
@@ -249,6 +256,7 @@ func waitMQTTTokenContext(parent context.Context, token mqtt.Token, timeout time
 	}
 }
 
+// WaitConnected bounds subscription readiness by both caller cancellation and a handshake deadline.
 func (c *MQTTClient) WaitConnected(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()

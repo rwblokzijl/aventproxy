@@ -148,6 +148,7 @@ func NewServerAPI(network, address string, filters *Filters) (*webrtc.API, error
 	), nil
 }
 
+// RegisterDefaultCodecs installs the camera's supported media codecs and RTCP feedback capabilities.
 func RegisterDefaultCodecs(m *webrtc.MediaEngine) error {
 	for _, codec := range []webrtc.RTPCodecParameters{
 		{

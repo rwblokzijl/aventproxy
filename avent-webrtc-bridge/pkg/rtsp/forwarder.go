@@ -91,6 +91,7 @@ func NewRTPForwarder() *RTPForwarder {
 	}
 }
 
+// AddUDPClient registers outgoing RTP at the actual RTSP peer's IP and negotiated ports.
 func (rf *RTPForwarder) AddUDPClient(sessionID string, peerIP string, videoRTPPort, audioRTPPort int) error {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
@@ -181,6 +182,7 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, peerIP string, videoRTPPo
 	return nil
 }
 
+// SetupUDPBackchannel allocates listener ports for an existing live RTP consumer.
 func (rf *RTPForwarder) SetupUDPBackchannel(sessionID string, clientPort int) (int, error) {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
@@ -227,6 +229,7 @@ func (rf *RTPForwarder) SetupUDPBackchannel(sessionID string, clientPort int) (i
 	return portPair.RTPPort, nil
 }
 
+// AddTCPClient registers negotiated interleaved channels while the forwarder is live.
 func (rf *RTPForwarder) AddTCPClient(sessionID string, conn net.Conn, videoRTPChannel, audioRTPChannel, backAudioRTPChannel byte) error {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
@@ -262,12 +265,14 @@ func (rf *RTPForwarder) AddTCPClient(sessionID string, conn net.Conn, videoRTPCh
 	return nil
 }
 
+// RemoveClient unregisters a consumer and releases its owned UDP sockets.
 func (rf *RTPForwarder) RemoveClient(sessionID string) {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
 	rf.removeClientLocked(sessionID)
 }
 
+// removeClientLocked releases one consumer under the forwarder's exclusive mutex.
 func (rf *RTPForwarder) removeClientLocked(sessionID string) {
 	if client, exists := rf.clients[sessionID]; exists {
 		if client.transportMode == TransportUDP {
@@ -338,6 +343,7 @@ func (rf *RTPForwarder) cacheNAL(packet *rtp.Packet, nalType byte) {
 	}
 }
 
+// ForwardVideoPacket updates video state and forwards a packet under exclusive ownership.
 func (rf *RTPForwarder) ForwardVideoPacket(packet *rtp.Packet) {
 	rf.mutex.Lock()
 
@@ -378,6 +384,7 @@ func (rf *RTPForwarder) ForwardVideoPacket(packet *rtp.Packet) {
 	rf.mutex.Unlock()
 }
 
+// forwardVideoData sends encoded video and removes failed consumers; the caller holds mutex.
 func (rf *RTPForwarder) forwardVideoData(packet *rtp.Packet) {
 	data, err := packet.Marshal()
 	if err != nil {
@@ -429,6 +436,7 @@ func (rf *RTPForwarder) forwardVideoData(packet *rtp.Packet) {
 	}
 }
 
+// ForwardAudioPacket serializes audio state updates with consumer registration and cleanup.
 func (rf *RTPForwarder) ForwardAudioPacket(packet *rtp.Packet) {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
@@ -480,6 +488,7 @@ func (rf *RTPForwarder) ForwardAudioPacket(packet *rtp.Packet) {
 	}
 }
 
+// Stop permanently closes this forwarder and prevents late registration from reopening it.
 func (rf *RTPForwarder) Stop() {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
@@ -584,6 +593,7 @@ func (rf *RTPForwarder) handleUDPBackchannelRTCP(listener *net.UDPConn) {
 	}
 }
 
+// sendInterleavedRTP bounds a media write, then clears its deadline for RTSP control traffic.
 func (rf *RTPForwarder) sendInterleavedRTP(conn net.Conn, channel byte, rtpData []byte) error {
 	// Interleaved format: $ + channel + length(2 bytes) + RTP data
 	header := make([]byte, 4)

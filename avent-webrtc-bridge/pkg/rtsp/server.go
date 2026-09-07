@@ -122,6 +122,7 @@ func NewRTSPServer(port int, storageManager *storage.StorageManager) *RTSPServer
 	}
 }
 
+// Start opens the RTSP listener and creates MQTT management tied to the server context.
 func (s *RTSPServer) Start() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -206,6 +207,7 @@ func (s *RTSPServer) GetPort() int {
 	return s.port
 }
 
+// GetStats snapshots client counts and stream readiness under their respective locks.
 func (s *RTSPServer) GetStats() ServerStats {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
@@ -234,6 +236,7 @@ type ServerStats struct {
 	TotalStreams int  `json:"totalStreams"`
 }
 
+// acceptConnections serves new sockets until server cancellation closes the listener.
 func (s *RTSPServer) acceptConnections() {
 	for {
 		select {
@@ -254,6 +257,7 @@ func (s *RTSPServer) acceptConnections() {
 	}
 }
 
+// handleConnection bounds the initial request and associates a socket with its camera stream.
 func (s *RTSPServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
@@ -356,6 +360,7 @@ func (s *RTSPServer) findCamera(path string) (*storage.CameraInfo, *storage.User
 	return nil, nil, nil
 }
 
+// getOrCreateStream reuses live/negotiating streams without doing network work under the map lock.
 func (s *RTSPServer) getOrCreateStream(camera *storage.CameraInfo, streamResolution string, user *storage.UserSession) (*CameraStream, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -470,6 +475,7 @@ func (s *RTSPServer) cleanupRoutine() {
 	}
 }
 
+// cleanupInactiveStreams retires viewerless streams after the inactivity threshold.
 func (s *RTSPServer) cleanupInactiveStreams() {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -558,6 +564,7 @@ func (cs *CameraStream) SetShutdownDelay(delay time.Duration) {
 	cs.shutdownDelay = delay
 }
 
+// Stop tears down media and closes a snapshot of its RTSP consumers without reentrant removal.
 func (cs *CameraStream) Stop() {
 	cs.mutex.Lock()
 	clients := make([]*RTSPClient, 0, len(cs.clients))
@@ -574,12 +581,14 @@ func (cs *CameraStream) Stop() {
 	}
 }
 
+// IsActive reads stream readiness under the stream state lock.
 func (cs *CameraStream) IsActive() bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	return cs.active
 }
 
+// Bridge returns a snapshot for non-registering operations; use withForwarder for SETUP.
 func (cs *CameraStream) Bridge() *WebRTCBridge {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
@@ -598,6 +607,7 @@ func (cs *CameraStream) withForwarder(client *RTSPClient, register func(*RTPForw
 	return register(bridge.rtpForwarder)
 }
 
+// startStream negotiates outside the state lock and publishes only a current, viewed bridge.
 func (cs *CameraStream) startStream() {
 	cs.mutex.Lock()
 	if cs.active || !cs.connecting {
@@ -741,6 +751,7 @@ func (cs *CameraStream) handleBridgeError(err error) {
 	cs.handleBridgeErrorFrom(nil, err)
 }
 
+// handleBridgeErrorFrom tears down active failures, ignoring stale or startup-owned callbacks.
 func (cs *CameraStream) handleBridgeErrorFrom(origin *WebRTCBridge, err error) {
 	cs.mutex.Lock()
 	// Start owns failures while negotiating. A queued callback from a discarded
@@ -777,6 +788,7 @@ func (cs *CameraStream) handleBridgeErrorFrom(origin *WebRTCBridge, err error) {
 	}
 }
 
+// stopStreamInternal clears active/startup state and tears down media while cs.mutex is held.
 func (cs *CameraStream) stopStreamInternal() {
 	// Check if we should actually stop
 	if !cs.active && !cs.connecting {

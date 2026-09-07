@@ -114,6 +114,7 @@ func generateSessionID() string {
 	return hex.EncodeToString(bytes)
 }
 
+// handleRTSPProtocol dispatches control requests and interleaved backchannel packets.
 func (s *RTSPServer) handleRTSPProtocol(client *RTSPClient) {
 	defer s.removeClient(client.session)
 
@@ -155,6 +156,7 @@ func (s *RTSPServer) handleRTSPProtocol(client *RTSPClient) {
 	}
 }
 
+// handleInterleavedRTP reads one framed packet and forwards supported backchannel audio.
 func (s *RTSPServer) handleInterleavedRTP(client *RTSPClient) error {
 	bridge := client.stream.Bridge()
 	// Read interleaved header: $ + channel + length(2 bytes)
@@ -298,6 +300,7 @@ func (s *RTSPServer) handleDescribe(client *RTSPClient, request *RTSPRequest) {
 	sendRTSPResponse(client.conn, 200, "OK", headers, sdp)
 }
 
+// handleSetup negotiates transport and registers media atomically on the current bridge.
 func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 	transport := request.Headers["Transport"]
 	if transport == "" {

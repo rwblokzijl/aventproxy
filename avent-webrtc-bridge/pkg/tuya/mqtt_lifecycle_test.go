@@ -11,17 +11,26 @@ import (
 
 type stalledToken struct{}
 
-func (stalledToken) Wait() bool                       { panic("unbounded MQTT wait") }
-func (stalledToken) WaitTimeout(d time.Duration) bool { time.Sleep(d); return false }
-func (stalledToken) Done() <-chan struct{}            { return nil }
-func (stalledToken) Error() error                     { return nil }
+// Wait detects accidental unbounded waiting in the acknowledgement helper.
+func (stalledToken) Wait() bool { panic("unbounded MQTT wait") }
 
+// WaitTimeout models a broker that never acknowledges a token.
+func (stalledToken) WaitTimeout(d time.Duration) bool { time.Sleep(d); return false }
+
+// Done never signals completion for the stalled-broker fixture.
+func (stalledToken) Done() <-chan struct{} { return nil }
+
+// Error has no terminal error because the fixture never completes.
+func (stalledToken) Error() error { return nil }
+
+// TestMQTTAcknowledgementHasDeadline rejects missing acknowledgements after a bounded wait.
 func TestMQTTAcknowledgementHasDeadline(t *testing.T) {
 	if err := waitMQTTToken(stalledToken{}, time.Millisecond); err == nil {
 		t.Fatal("missing acknowledgement was treated as success")
 	}
 }
 
+// TestMQTTSubscriptionWaitCanBeCanceled propagates caller cancellation through readiness.
 func TestMQTTSubscriptionWaitCanBeCanceled(t *testing.T) {
 	client := &MQTTClient{}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -31,6 +40,7 @@ func TestMQTTSubscriptionWaitCanBeCanceled(t *testing.T) {
 	}
 }
 
+// TestConcurrentMQTTSessionCleanup checks session-map synchronization during teardown.
 func TestConcurrentMQTTSessionCleanup(t *testing.T) {
 	client := &MQTTClient{}
 	var wg sync.WaitGroup

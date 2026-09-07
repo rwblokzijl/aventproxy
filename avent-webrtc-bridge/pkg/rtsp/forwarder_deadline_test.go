@@ -14,11 +14,13 @@ type deadlineConn struct {
 	closed   bool
 }
 
+// SetWriteDeadline records persistent deadline state for the control-traffic regression.
 func (c *deadlineConn) SetWriteDeadline(deadline time.Time) error {
 	c.deadline = deadline
 	return nil
 }
 
+// Write simulates either a completed media write or a failed consumer.
 func (c *deadlineConn) Write(p []byte) (int, error) {
 	if c.writeErr != nil {
 		return 0, c.writeErr
@@ -26,6 +28,7 @@ func (c *deadlineConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Close records whether the failing consumer was closed.
 func (c *deadlineConn) Close() error { c.closed = true; return nil }
 
 // TestInterleavedWriteClearsDeadline protects later RTSP control responses.

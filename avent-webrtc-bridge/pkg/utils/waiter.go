@@ -18,6 +18,7 @@ type Waiter struct {
 	done  chan struct{}
 }
 
+// Add registers work before terminal completion; completed waiters cannot be reused.
 func (w *Waiter) Add(delta int) {
 	w.mu.Lock()
 	if w.state >= 0 {
@@ -26,6 +27,7 @@ func (w *Waiter) Add(delta int) {
 	w.mu.Unlock()
 }
 
+// Wait returns the terminal result, registering one implicit task for a zero-value waiter.
 func (w *Waiter) Wait() error {
 	return w.WaitContext(context.Background())
 }
@@ -58,6 +60,7 @@ func (w *Waiter) WaitContext(ctx context.Context) error {
 	}
 }
 
+// Done completes one task and publishes the final result exactly once before waking waiters.
 func (w *Waiter) Done(err error) {
 	w.mu.Lock()
 
@@ -78,6 +81,7 @@ func (w *Waiter) Done(err error) {
 	w.mu.Unlock()
 }
 
+// WaitChan delivers the terminal result through a buffered channel, including for late subscribers.
 func (w *Waiter) WaitChan() <-chan error {
 	ch := make(chan error, 1)
 	go func() { ch <- w.Wait() }()

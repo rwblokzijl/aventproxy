@@ -8,6 +8,7 @@ import (
 	"github.com/pion/rtp"
 )
 
+// TestUDPVideoAndAudioUseRTSPPeerAddress verifies initial and subsequent SETUP destinations.
 func TestUDPVideoAndAudioUseRTSPPeerAddress(t *testing.T) {
 	// A non-localhost loopback address detects the original localhost bug,
 	// without contacting a camera or requiring external network access.
@@ -42,6 +43,7 @@ func TestUDPVideoAndAudioUseRTSPPeerAddress(t *testing.T) {
 	}
 }
 
+// TestUDPRejectsNonIPDestination rejects hostnames instead of trusting arbitrary destinations.
 func TestUDPRejectsNonIPDestination(t *testing.T) {
 	forwarder := NewRTPForwarder()
 	defer forwarder.Stop()
