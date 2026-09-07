@@ -114,6 +114,7 @@ func generateSessionID() string {
 	return hex.EncodeToString(bytes)
 }
 
+// handleRTSPProtocol dispatches control requests and interleaved backchannel packets.
 func (s *RTSPServer) handleRTSPProtocol(client *RTSPClient) {
 	defer s.removeClient(client.session)
 
@@ -125,7 +126,7 @@ func (s *RTSPServer) handleRTSPProtocol(client *RTSPClient) {
 		// Check for interleaved RTP (backchannel)
 		firstByte, err := client.reader.Peek(1)
 		if err != nil {
-			if client.stream.active && !strings.Contains(err.Error(), "connection reset by peer") {
+			if client.stream.IsActive() && !strings.Contains(err.Error(), "connection reset by peer") {
 				core.Logger.Error().Err(err).Msg("Error peeking connection")
 			}
 			break
@@ -143,7 +144,7 @@ func (s *RTSPServer) handleRTSPProtocol(client *RTSPClient) {
 		// Handle regular RTSP request
 		request, err := s.parseRTSPRequestFromReader(client.reader)
 		if err != nil {
-			if client.stream.active && !strings.Contains(err.Error(), "connection reset by peer") {
+			if client.stream.IsActive() && !strings.Contains(err.Error(), "connection reset by peer") {
 				core.Logger.Error().Err(err).Msg("Error parsing RTSP request")
 			}
 			break
@@ -155,7 +156,9 @@ func (s *RTSPServer) handleRTSPProtocol(client *RTSPClient) {
 	}
 }
 
+// handleInterleavedRTP reads one framed packet and forwards supported backchannel audio.
 func (s *RTSPServer) handleInterleavedRTP(client *RTSPClient) error {
+	bridge := client.stream.Bridge()
 	// Read interleaved header: $ + channel + length(2 bytes)
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(client.reader, header); err != nil {
@@ -184,10 +187,9 @@ func (s *RTSPServer) handleInterleavedRTP(client *RTSPClient) error {
 		}
 
 		// Forward to WebRTC bridge
-		if client.stream != nil && client.stream.webrtcBridge != nil &&
-			client.stream.webrtcBridge.rtpForwarder != nil &&
-			client.stream.webrtcBridge.rtpForwarder.OnBackchannelAudio != nil {
-			client.stream.webrtcBridge.rtpForwarder.OnBackchannelAudio(packet)
+		if bridge != nil && bridge.rtpForwarder != nil &&
+			bridge.rtpForwarder.OnBackchannelAudio != nil {
+			bridge.rtpForwarder.OnBackchannelAudio(packet)
 		}
 	}
 
@@ -298,6 +300,7 @@ func (s *RTSPServer) handleDescribe(client *RTSPClient, request *RTSPRequest) {
 	sendRTSPResponse(client.conn, 200, "OK", headers, sdp)
 }
 
+// handleSetup negotiates transport and registers media atomically on the current bridge.
 func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 	transport := request.Headers["Transport"]
 	if transport == "" {
@@ -369,8 +372,10 @@ func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 			rtpChannel, rtcpChannel)
 
 		// For TCP, add/update client after each setup
-		err := client.stream.webrtcBridge.rtpForwarder.AddTCPClient(client.session, client.conn,
-			client.videoRTPChannel, client.audioRTPChannel, client.backAudioRTPChannel)
+		err := client.stream.withForwarder(client, func(forwarder *RTPForwarder) error {
+			return forwarder.AddTCPClient(client.session, client.conn,
+				client.videoRTPChannel, client.audioRTPChannel, client.backAudioRTPChannel)
+		})
 		if err != nil {
 			core.Logger.Error().Err(err).Msg("Error adding TCP RTP client")
 			sendRTSPResponse(client.conn, 500, "Internal Server Error", nil,
@@ -413,18 +418,20 @@ func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 			core.Logger.Trace().Msgf("Setup audio track - Client RTP port: %d, RTCP port: %d", clientRTPPort, clientRTCPPort)
 		} else if isBackchannel {
 			// For backchannel, setup the server listener and get actual server port
-			if client.stream != nil && client.stream.webrtcBridge != nil {
-				port, err := client.stream.webrtcBridge.rtpForwarder.SetupUDPBackchannel(
-					client.session, clientRTPPort)
-				if err != nil {
-					core.Logger.Error().Err(err).Msg("Failed to setup UDP backchannel")
-					sendRTSPResponse(client.conn, 500, "Internal Server Error", nil,
-						"Failed to setup backchannel")
-					return
-				}
-				client.backAudioRTPPort = port
-				client.backAudioRTCPPort = port + 1
+			var port int
+			err := client.stream.withForwarder(client, func(forwarder *RTPForwarder) error {
+				var err error
+				port, err = forwarder.SetupUDPBackchannel(client.session, clientRTPPort)
+				return err
+			})
+			if err != nil {
+				core.Logger.Error().Err(err).Msg("Failed to setup UDP backchannel")
+				sendRTSPResponse(client.conn, 500, "Internal Server Error", nil,
+					"Failed to setup backchannel")
+				return
 			}
+			client.backAudioRTPPort = port
+			client.backAudioRTCPPort = port + 1
 			core.Logger.Trace().Msgf("Setup backchannel track - Client RTP port: %d, Server RTP port: %d", clientRTPPort, client.backAudioRTPPort)
 		}
 
@@ -444,8 +451,15 @@ func (s *RTSPServer) handleSetup(client *RTSPClient, request *RTSPRequest) {
 
 		// Add/update UDP client with current ports after video and audio setup
 		if isVideoTrack || isAudioTrack {
-			err := client.stream.webrtcBridge.rtpForwarder.AddUDPClient(client.session,
-				client.videoRTPPort, client.audioRTPPort)
+			peerIP, _, err := net.SplitHostPort(client.conn.RemoteAddr().String())
+			if err != nil {
+				sendRTSPResponse(client.conn, 461, "Unsupported Transport", nil, "")
+				return
+			}
+			err = client.stream.withForwarder(client, func(forwarder *RTPForwarder) error {
+				return forwarder.AddUDPClient(client.session, peerIP,
+					client.videoRTPPort, client.audioRTPPort)
+			})
 			if err != nil {
 				core.Logger.Error().Err(err).Msg("Error adding UDP RTP client")
 				sendRTSPResponse(client.conn, 500, "Internal Server Error", nil,

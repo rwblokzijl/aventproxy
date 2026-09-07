@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pion "github.com/pion/webrtc/v4"
@@ -43,7 +44,10 @@ type WebRTCBridge struct {
 	rtpForwarder   *RTPForwarder
 
 	// State
-	connected         bool
+	connected         atomic.Bool
+	stopped           bool
+	callbackMutex     sync.RWMutex
+	signalingMutex    sync.Mutex
 	ownsClient        bool
 	answerReceived    bool
 	pendingCandidates []pion.ICECandidateInit
@@ -72,6 +76,7 @@ type WebRTCBridge struct {
 	OnError       func(error)
 }
 
+// NewWebRTCBridge allocates a single-use camera session without opening connections.
 func NewWebRTCBridge(camera *storage.CameraInfo, streamResolution string, user *storage.UserSession, storageManager *storage.StorageManager) *WebRTCBridge {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -81,7 +86,6 @@ func NewWebRTCBridge(camera *storage.CameraInfo, streamResolution string, user *
 		user:           user,
 		rtpForwarder:   NewRTPForwarder(),
 		storageManager: storageManager,
-		connected:      false,
 		waiter:         utils.Waiter{},
 		ctx:            ctx,
 		cancel:         cancel,
@@ -96,36 +100,48 @@ func (wb *WebRTCBridge) SetMobileClient(client *tuya.MobileSDKClient) {
 	wb.mobileClient = client
 }
 
+// SetMQTTClient supplies a shared MQTT session that bridge teardown must not close.
 func (wb *WebRTCBridge) SetMQTTClient(client *tuya.MQTTClient) {
+	wb.mutex.Lock()
+	defer wb.mutex.Unlock()
 	wb.mqttClient = client
 }
 
-func (wb *WebRTCBridge) Start() error {
+// Start negotiates media with bounded waits and cleans every partially failed session.
+func (wb *WebRTCBridge) Start() (err error) {
 	wb.mutex.Lock()
 	defer wb.mutex.Unlock()
 
-	if wb.connected {
+	if wb.connected.Load() {
 		return errors.New("bridge already connected")
 	}
+	if wb.stopped || wb.ctx.Err() != nil {
+		return errors.New("bridge already stopped; create a new bridge")
+	}
+	// Every partially allocated session owns sockets, even if it never connects.
+	defer func() {
+		if err != nil {
+			wb.stopLocked()
+		}
+	}()
 
 	core.Logger.Info().Msgf("Starting WebRTC bridge for camera: %s", wb.camera.DeviceName)
 
 	var webRTCConfig *tuya.WebRTCConfigResponse
 	var mobileMqttsUrl string
-	var err error
 
 	if wb.mobileClient != nil {
 		// Mobile SDK path
 		core.Logger.Info().Msg("Using Tuya Mobile SDK API")
 
-		if err := wb.mobileClient.P2PPreLink(wb.camera.DeviceID); err != nil {
+		if err := wb.mobileClient.P2PPreLinkContext(wb.ctx, wb.camera.DeviceID); err != nil {
 			core.Logger.Warn().Err(err).Msgf(
 				"P2P pre-link failed for camera %s (non-fatal, but the WebRTC config may be refused)",
 				wb.camera.DeviceName,
 			)
 		}
 
-		webRTCConfig, err = wb.mobileClient.GetWebRTCConfig(wb.camera.DeviceID)
+		webRTCConfig, err = wb.mobileClient.GetWebRTCConfigContext(wb.ctx, wb.camera.DeviceID)
 		if err != nil {
 			return fmt.Errorf(
 				"failed to get WebRTC config for camera %s (id %s): %v",
@@ -133,13 +149,13 @@ func (wb *WebRTCBridge) Start() error {
 			)
 		}
 
-		if err := wb.mobileClient.RTCSessionInit(wb.camera.DeviceID); err != nil {
+		if err := wb.mobileClient.RTCSessionInitContext(wb.ctx, wb.camera.DeviceID); err != nil {
 			core.Logger.Warn().Err(err).Msg("RTC session init failed (non-fatal)")
 		}
 
 		if wb.mqttClient == nil {
 			// No pre-set MQTT client — create one (fallback for non-managed mode)
-			userInfo, err := wb.mobileClient.GetUserInfo()
+			userInfo, err := wb.mobileClient.GetUserInfoContext(wb.ctx)
 			if err != nil {
 				return fmt.Errorf("failed to get user info: %v", err)
 			}
@@ -152,7 +168,7 @@ func (wb *WebRTCBridge) Start() error {
 			mqttClientID := wb.mobileClient.DeriveMQTTClientID(uid)
 			subscribeTopic := fmt.Sprintf("/av/u/%s", uid)
 
-			wb.mqttClient, err = tuya.NewMobileMqttClient(&tuya.MobileMQTTConfig{
+			wb.mqttClient, err = tuya.NewMobileMqttClientContext(wb.ctx, &tuya.MobileMQTTConfig{
 				Username:       mqttUsername,
 				Password:       mqttDerived.Password,
 				ClientID:       mqttClientID,
@@ -164,7 +180,8 @@ func (wb *WebRTCBridge) Start() error {
 				return fmt.Errorf("failed to connect to MQTT: %v", err)
 			}
 
-			if err = wb.mqttClient.Connected.Wait(); err != nil {
+			wb.ownsClient = true
+			if err = wb.mqttClient.WaitConnected(wb.ctx); err != nil {
 				return fmt.Errorf("MQTT connection failed: %v", err)
 			}
 
@@ -197,7 +214,7 @@ func (wb *WebRTCBridge) Start() error {
 			return fmt.Errorf("failed to get WebRTC config: %v", err)
 		}
 
-		wb.mqttClient, err = tuya.NewMqttClient(
+		wb.mqttClient, err = tuya.NewMqttClientContext(wb.ctx,
 			clientId,
 			mobileMqttsUrl,
 			&mqttConfig.Result,
@@ -206,7 +223,8 @@ func (wb *WebRTCBridge) Start() error {
 			return fmt.Errorf("failed to connect to MQTT: %v", err)
 		}
 
-		if err = wb.mqttClient.Connected.Wait(); err != nil {
+		wb.ownsClient = true
+		if err = wb.mqttClient.WaitConnected(wb.ctx); err != nil {
 			return fmt.Errorf("MQTT connection failed: %v", err)
 		}
 	}
@@ -249,35 +267,47 @@ func (wb *WebRTCBridge) Start() error {
 		return fmt.Errorf("failed to create offer: %v", err)
 	}
 
-	if err = wb.waiter.Wait(); err != nil {
+	if err = wb.waitForConnection(20 * time.Second); err != nil {
 		return fmt.Errorf("failed to establish connection: %v", err)
 	}
 
-	wb.connected = true
+	if err = wb.ctx.Err(); err != nil {
+		return err
+	}
+	wb.connected.Store(true)
 	core.Logger.Info().Msgf("WebRTC bridge started successfully for camera: %s", wb.camera.DeviceName)
 
 	return nil
 }
 
+// Stop cancels negotiation and releases resources even if media never connected.
 func (wb *WebRTCBridge) Stop() {
+	// Wake a negotiating Start before waiting for its resource lock.
+	wb.cancel()
 	wb.mutex.Lock()
 	defer wb.mutex.Unlock()
+	wb.stopLocked()
+}
 
-	if !wb.connected {
+// waitForConnection bounds media negotiation by both a deadline and bridge cancellation.
+func (wb *WebRTCBridge) waitForConnection(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(wb.ctx, timeout)
+	defer cancel()
+	return wb.waiter.WaitContext(ctx)
+}
+
+// stopLocked performs idempotent resource cleanup while the bridge mutex is held.
+func (wb *WebRTCBridge) stopLocked() {
+	if wb.stopped {
 		return
 	}
-
-	wb.connected = false
+	wb.stopped = true
+	wb.connected.Store(false)
 
 	core.Logger.Info().Msgf("Stopping WebRTC bridge for camera: %s", wb.camera.DeviceName)
 
 	// Cancel context to stop all goroutines
 	wb.cancel()
-
-	// Send disconnect
-	if wb.cameraClient != nil {
-		wb.cameraClient.SendDisconnect()
-	}
 
 	// Close peer connection
 	if wb.peerConnection != nil {
@@ -287,6 +317,8 @@ func (wb *WebRTCBridge) Stop() {
 	// Deregister camera client from MQTT
 	if wb.mqttClient != nil && wb.cameraClient != nil {
 		wb.mqttClient.RemoveCameraClient(wb.cameraClient.SessionId)
+		// Best effort and time-bounded; cleanup must not wait forever for PUBACK.
+		_ = wb.cameraClient.SendDisconnect()
 	}
 
 	// Only stop MQTT client if we created it (not managed by MQTTManager)
@@ -302,10 +334,9 @@ func (wb *WebRTCBridge) Stop() {
 	core.Logger.Info().Msgf("WebRTC bridge stopped for camera: %s", wb.camera.DeviceName)
 }
 
+// IsConnected reports media readiness without taking the negotiation resource lock.
 func (wb *WebRTCBridge) IsConnected() bool {
-	wb.mutex.RLock()
-	defer wb.mutex.RUnlock()
-	return wb.connected
+	return wb.connected.Load()
 }
 
 func (wb *WebRTCBridge) ForwardBackchannelAudioPacket(packet *rtp.Packet) {
@@ -314,6 +345,7 @@ func (wb *WebRTCBridge) ForwardBackchannelAudioPacket(packet *rtp.Packet) {
 	}
 }
 
+// setupPeerConnection configures codecs, ICE and callbacks for this camera session.
 func (wb *WebRTCBridge) setupPeerConnection(webRTCConfig *tuya.WebRTCConfig) error {
 	// Convert ICE servers
 	iceServerBytes, err := json.Marshal(webRTCConfig.P2PConfig.Ices)
@@ -354,6 +386,9 @@ func (wb *WebRTCBridge) setupPeerConnection(webRTCConfig *tuya.WebRTCConfig) err
 			MaxRetransmits: &maxRetransmits,
 			Ordered:        &ordered,
 		})
+		if err != nil {
+			return fmt.Errorf("failed to create data channel: %w", err)
+		}
 
 		wb.dataChannel.OnMessage(func(msg pion.DataChannelMessage) {
 			if msg.IsString {
@@ -407,8 +442,12 @@ func (wb *WebRTCBridge) setupPeerConnection(webRTCConfig *tuya.WebRTCConfig) err
 		if state == pion.PeerConnectionStateConnected {
 			core.Logger.Info().Msgf("WebRTC connection established")
 
-			if !wb.isHEVC && wb.resolution == "hd" {
-				_ = wb.cameraClient.SendResolution(0)
+			if !wb.isHEVC && wb.ctx.Err() == nil && wb.cameraClient != nil {
+				resolution := 0
+				if wb.resolution == "sd" {
+					resolution = 1
+				}
+				_ = wb.cameraClient.SendResolution(resolution)
 				wb.waiter.Done(nil)
 			}
 		}
@@ -452,6 +491,7 @@ func (wb *WebRTCBridge) setupPeerConnection(webRTCConfig *tuya.WebRTCConfig) err
 	return nil
 }
 
+// setupMQTTCameraClient serializes answer/candidate handling and drops canceled signaling.
 func (wb *WebRTCBridge) setupMQTTCameraClient(webRTCConfig *tuya.WebRTCConfig) {
 	device := &tuya.Device{
 		DeviceId:   wb.camera.DeviceID,
@@ -470,6 +510,11 @@ func (wb *WebRTCBridge) setupMQTTCameraClient(webRTCConfig *tuya.WebRTCConfig) {
 	wb.pendingCandidates = nil
 
 	wb.cameraClient.HandleAnswer = func(answer tuya.AnswerFrame) {
+		wb.signalingMutex.Lock()
+		defer wb.signalingMutex.Unlock()
+		if wb.ctx.Err() != nil {
+			return
+		}
 		core.Logger.Trace().Msgf("Received WebRTC answer")
 
 		desc := pion.SessionDescription{
@@ -499,6 +544,11 @@ func (wb *WebRTCBridge) setupMQTTCameraClient(webRTCConfig *tuya.WebRTCConfig) {
 	}
 
 	wb.cameraClient.HandleCandidate = func(candidate tuya.CandidateFrame) {
+		wb.signalingMutex.Lock()
+		defer wb.signalingMutex.Unlock()
+		if wb.ctx.Err() != nil {
+			return
+		}
 		candidateStr := strings.TrimSpace(candidate.Candidate)
 		if candidateStr == "" {
 			return
@@ -531,7 +581,6 @@ func (wb *WebRTCBridge) setupMQTTCameraClient(webRTCConfig *tuya.WebRTCConfig) {
 
 	wb.cameraClient.HandleDisconnect = func() {
 		wb.handleError(errors.New("camera client disconnected"))
-		wb.connected = false
 	}
 }
 
@@ -632,7 +681,11 @@ func (wb *WebRTCBridge) handleAudioTrack(track *pion.TrackRemote) {
 	}
 }
 
+// createHTTPClient restores legacy session cookies, or returns nil without login state.
 func (wb *WebRTCBridge) createHTTPClient() *http.Client {
+	if wb.user == nil || wb.user.SessionData == nil {
+		return nil
+	}
 	jar, err := cookiejar.New(&cookiejar.Options{
 		PublicSuffixList: publicsuffix.List,
 	})
@@ -716,9 +769,27 @@ func (wb *WebRTCBridge) sendMessageToDataChannel(message []byte) error {
 	return nil
 }
 
+// SetErrorHandler safely replaces the stream owner's asynchronous failure callback.
+func (wb *WebRTCBridge) SetErrorHandler(handler func(error)) {
+	wb.callbackMutex.Lock()
+	defer wb.callbackMutex.Unlock()
+	wb.OnError = handler
+}
+
+// handleError completes negotiation and notifies the owner without blocking signaling.
 func (wb *WebRTCBridge) handleError(err error) {
-	if wb.OnError != nil {
-		wb.waiter.Done(err)
-		wb.OnError(err)
+	// Always finish negotiation, including standalone bridges without a callback.
+	wb.waiter.Done(err)
+	wb.connected.Store(false)
+	if wb.ctx.Err() != nil {
+		return // Expected close callbacks during intentional teardown.
+	}
+	wb.cancel()
+	wb.callbackMutex.RLock()
+	handler := wb.OnError
+	wb.callbackMutex.RUnlock()
+	if handler != nil {
+		// Never block MQTT/Pion dispatch on stream locks or a disconnect PUBACK.
+		go handler(err)
 	}
 }

@@ -183,8 +183,9 @@ func (c *MQTTCameraClient) onError(err error) {
 	}
 }
 
+// sendMqttMessage publishes camera signaling only on a live session with a bounded acknowledgement wait.
 func (c *MQTTCameraClient) sendMqttMessage(messageType string, protocol int, transactionID string, data interface{}) error {
-	if c.mqttClient.closed {
+	if c.mqttClient == nil || !c.mqttClient.IsConnected() {
 		return errors.New("mqtt client is closed, send mqtt message fail")
 	}
 
@@ -218,9 +219,9 @@ func (c *MQTTCameraClient) sendMqttMessage(messageType string, protocol int, tra
 	}
 
 	token := c.mqttClient.mqtt.Publish(c.publishTopic, 1, false, payload)
-	if token.Wait() && token.Error() != nil {
-		core.Logger.Error().Err(token.Error()).Msgf("Send mqtt message error")
-		return token.Error()
+	if err := waitMQTTToken(token, 5*time.Second); err != nil {
+		core.Logger.Error().Err(err).Msgf("Send mqtt message error")
+		return err
 	}
 
 	return nil

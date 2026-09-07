@@ -5,6 +5,7 @@ import (
 	"avent-webrtc-bridge/pkg/utils"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ const (
 type RTPForwarder struct {
 	clients map[string]*RTPClient
 	mutex   sync.RWMutex
+	stopped bool
 
 	// RTP session info
 	videoSSRC uint32
@@ -89,9 +91,18 @@ func NewRTPForwarder() *RTPForwarder {
 	}
 }
 
-func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPort int) error {
+// AddUDPClient registers outgoing RTP at the actual RTSP peer's IP and negotiated ports.
+func (rf *RTPForwarder) AddUDPClient(sessionID string, peerIP string, videoRTPPort, audioRTPPort int) error {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	if rf.stopped {
+		return fmt.Errorf("RTP forwarder is stopped")
+	}
+	// RTSP consumers normally run in another container/host. Send to the
+	// connected peer, never localhost or a client-supplied destination header.
+	if net.ParseIP(peerIP) == nil {
+		return fmt.Errorf("invalid RTSP peer IP")
+	}
 
 	// Check if client already exists
 	if client, exists := rf.clients[sessionID]; exists {
@@ -102,14 +113,14 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPor
 
 		// Create new connections if needed
 		if videoRTPPort > 0 && client.videoConn == nil {
-			videoAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", videoRTPPort))
+			videoAddr, _ := net.ResolveUDPAddr("udp", net.JoinHostPort(peerIP, strconv.Itoa(videoRTPPort)))
 			videoConn, _ := net.DialUDP("udp", nil, videoAddr)
 			client.videoAddr = videoAddr
 			client.videoConn = videoConn
 		}
 
 		if audioRTPPort > 0 && client.audioConn == nil {
-			audioAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", audioRTPPort))
+			audioAddr, _ := net.ResolveUDPAddr("udp", net.JoinHostPort(peerIP, strconv.Itoa(audioRTPPort)))
 			audioConn, _ := net.DialUDP("udp", nil, audioAddr)
 			client.audioAddr = audioAddr
 			client.audioConn = audioConn
@@ -128,7 +139,7 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPor
 
 	// Create video connection if port provided
 	if videoRTPPort > 0 {
-		videoAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", videoRTPPort))
+		videoAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(peerIP, strconv.Itoa(videoRTPPort)))
 		if err != nil {
 			return fmt.Errorf("failed to resolve video UDP address: %v", err)
 		}
@@ -144,7 +155,7 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPor
 
 	// Create audio connection if port provided
 	if audioRTPPort > 0 {
-		audioAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("localhost:%d", audioRTPPort))
+		audioAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(peerIP, strconv.Itoa(audioRTPPort)))
 		if err != nil {
 			if client.videoConn != nil {
 				client.videoConn.Close()
@@ -171,9 +182,13 @@ func (rf *RTPForwarder) AddUDPClient(sessionID string, videoRTPPort, audioRTPPor
 	return nil
 }
 
+// SetupUDPBackchannel allocates listener ports for an existing live RTP consumer.
 func (rf *RTPForwarder) SetupUDPBackchannel(sessionID string, clientPort int) (int, error) {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	if rf.stopped {
+		return 0, fmt.Errorf("RTP forwarder is stopped")
+	}
 
 	client, exists := rf.clients[sessionID]
 	if !exists {
@@ -214,9 +229,13 @@ func (rf *RTPForwarder) SetupUDPBackchannel(sessionID string, clientPort int) (i
 	return portPair.RTPPort, nil
 }
 
+// AddTCPClient registers negotiated interleaved channels while the forwarder is live.
 func (rf *RTPForwarder) AddTCPClient(sessionID string, conn net.Conn, videoRTPChannel, audioRTPChannel, backAudioRTPChannel byte) error {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	if rf.stopped {
+		return fmt.Errorf("RTP forwarder is stopped")
+	}
 
 	// Check if client already exists, update it
 	if existingClient, exists := rf.clients[sessionID]; exists {
@@ -246,10 +265,15 @@ func (rf *RTPForwarder) AddTCPClient(sessionID string, conn net.Conn, videoRTPCh
 	return nil
 }
 
+// RemoveClient unregisters a consumer and releases its owned UDP sockets.
 func (rf *RTPForwarder) RemoveClient(sessionID string) {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	rf.removeClientLocked(sessionID)
+}
 
+// removeClientLocked releases one consumer under the forwarder's exclusive mutex.
+func (rf *RTPForwarder) removeClientLocked(sessionID string) {
 	if client, exists := rf.clients[sessionID]; exists {
 		if client.transportMode == TransportUDP {
 			if client.videoConn != nil {
@@ -319,11 +343,12 @@ func (rf *RTPForwarder) cacheNAL(packet *rtp.Packet, nalType byte) {
 	}
 }
 
+// ForwardVideoPacket updates video state and forwards a packet under exclusive ownership.
 func (rf *RTPForwarder) ForwardVideoPacket(packet *rtp.Packet) {
-	rf.mutex.RLock()
+	rf.mutex.Lock()
 
 	if len(rf.clients) == 0 {
-		rf.mutex.RUnlock()
+		rf.mutex.Unlock()
 		return
 	}
 
@@ -356,9 +381,10 @@ func (rf *RTPForwarder) ForwardVideoPacket(packet *rtp.Packet) {
 	}
 
 	rf.forwardVideoData(packet)
-	rf.mutex.RUnlock()
+	rf.mutex.Unlock()
 }
 
+// forwardVideoData sends encoded video and removes failed consumers; the caller holds mutex.
 func (rf *RTPForwarder) forwardVideoData(packet *rtp.Packet) {
 	data, err := packet.Marshal()
 	if err != nil {
@@ -405,14 +431,15 @@ func (rf *RTPForwarder) forwardVideoData(packet *rtp.Packet) {
 	if len(deadClients) > 0 {
 		for _, id := range deadClients {
 			core.Logger.Info().Msgf("Removing dead video client %s", id)
-			delete(rf.clients, id)
+			rf.removeClientLocked(id)
 		}
 	}
 }
 
+// ForwardAudioPacket serializes audio state updates with consumer registration and cleanup.
 func (rf *RTPForwarder) ForwardAudioPacket(packet *rtp.Packet) {
-	rf.mutex.RLock()
-	defer rf.mutex.RUnlock()
+	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
 
 	if len(rf.clients) == 0 {
 		return
@@ -461,7 +488,11 @@ func (rf *RTPForwarder) ForwardAudioPacket(packet *rtp.Packet) {
 	}
 }
 
+// Stop permanently closes this forwarder and prevents late registration from reopening it.
 func (rf *RTPForwarder) Stop() {
+	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
+	rf.stopped = true
 	// Reset SSRCs
 	rf.videoSSRC = 0
 	rf.audioSSRC = 1
@@ -472,7 +503,7 @@ func (rf *RTPForwarder) Stop() {
 
 	// Clear all clients
 	for sessionID := range rf.clients {
-		rf.RemoveClient(sessionID)
+		rf.removeClientLocked(sessionID)
 	}
 
 	core.Logger.Trace().Msg("RTPForwarder stopped and all clients cleared")
@@ -562,6 +593,7 @@ func (rf *RTPForwarder) handleUDPBackchannelRTCP(listener *net.UDPConn) {
 	}
 }
 
+// sendInterleavedRTP bounds a media write, then clears its deadline for RTSP control traffic.
 func (rf *RTPForwarder) sendInterleavedRTP(conn net.Conn, channel byte, rtpData []byte) error {
 	// Interleaved format: $ + channel + length(2 bytes) + RTP data
 	header := make([]byte, 4)
@@ -573,7 +605,13 @@ func (rf *RTPForwarder) sendInterleavedRTP(conn net.Conn, channel byte, rtpData 
 	// Send header + data in one write to avoid fragmentation
 	fullPacket := append(header, rtpData...)
 
+	// A disappeared browser must not hold the forwarder (and teardown) forever.
+	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return err
+	}
+	defer conn.SetWriteDeadline(time.Time{})
 	if _, err := conn.Write(fullPacket); err != nil {
+		_ = conn.Close()
 		return err
 	}
 

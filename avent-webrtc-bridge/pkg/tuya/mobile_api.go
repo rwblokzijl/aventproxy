@@ -1,6 +1,7 @@
 package tuya
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/sha256"
@@ -164,7 +165,13 @@ func (c *MobileSDKClient) buildParams(action, version string, postData interface
 	return params
 }
 
+// Call sends a signed API request with the default HTTP timeout.
 func (c *MobileSDKClient) Call(action, version string, postData interface{}) (json.RawMessage, error) {
+	return c.CallContext(context.Background(), action, version, postData)
+}
+
+// CallContext propagates cancellation through request dispatch and response reading.
+func (c *MobileSDKClient) CallContext(ctx context.Context, action, version string, postData interface{}) (json.RawMessage, error) {
 	params := c.buildParams(action, version, postData)
 
 	form := url.Values{}
@@ -172,7 +179,7 @@ func (c *MobileSDKClient) Call(action, version string, postData interface{}) (js
 		form.Set(k, v)
 	}
 
-	req, err := http.NewRequest("POST", c.BaseURL, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -229,17 +236,34 @@ func parseAPIResponse(body []byte) (json.RawMessage, error) {
 // pre-link before granting the config, the next call comes back
 // PERMISSION_DENIED (issue #48).
 func (c *MobileSDKClient) P2PPreLink(deviceID string) error {
-	_, err := c.Call("smartlife.m.p2p.main.pre.link.get", "1.0", map[string]string{"devId": deviceID})
+	return c.P2PPreLinkContext(context.Background(), deviceID)
+}
+
+// P2PPreLinkContext makes stream-intent signaling cancellable during bridge startup.
+func (c *MobileSDKClient) P2PPreLinkContext(ctx context.Context, deviceID string) error {
+	_, err := c.CallContext(ctx, "smartlife.m.p2p.main.pre.link.get", "1.0", map[string]string{"devId": deviceID})
 	return err
 }
 
+// RTCSessionInit initializes media signaling with the default HTTP timeout.
 func (c *MobileSDKClient) RTCSessionInit(deviceID string) error {
-	_, err := c.Call("smartlife.m.rtc.session.init", "1.0", map[string]string{"devId": deviceID})
+	return c.RTCSessionInitContext(context.Background(), deviceID)
+}
+
+// RTCSessionInitContext propagates bridge cancellation through media-session initialization.
+func (c *MobileSDKClient) RTCSessionInitContext(ctx context.Context, deviceID string) error {
+	_, err := c.CallContext(ctx, "smartlife.m.rtc.session.init", "1.0", map[string]string{"devId": deviceID})
 	return err
 }
 
+// GetWebRTCConfig fetches media capabilities with the default HTTP timeout.
 func (c *MobileSDKClient) GetWebRTCConfig(deviceID string) (*WebRTCConfigResponse, error) {
-	raw, err := c.Call("smartlife.m.rtc.config.get", "1.0", map[string]string{"devId": deviceID})
+	return c.GetWebRTCConfigContext(context.Background(), deviceID)
+}
+
+// GetWebRTCConfigContext makes media configuration requests cancellable during startup.
+func (c *MobileSDKClient) GetWebRTCConfigContext(ctx context.Context, deviceID string) (*WebRTCConfigResponse, error) {
+	raw, err := c.CallContext(ctx, "smartlife.m.rtc.config.get", "1.0", map[string]string{"devId": deviceID})
 	if err != nil {
 		return nil, err
 	}
@@ -276,8 +300,14 @@ func (c *MobileSDKClient) DeriveMQTTClientID(uid string) string {
 	return fmt.Sprintf("%s_mb_%s_%s_DEFAULT", pkg, c.DeviceID, uidHash)
 }
 
+// GetUserInfo fetches account metadata using the default HTTP timeout.
 func (c *MobileSDKClient) GetUserInfo() (*UserInfoResult, error) {
-	raw, err := c.Call("smartlife.m.user.info.get", "1.0", nil)
+	return c.GetUserInfoContext(context.Background())
+}
+
+// GetUserInfoContext makes broker discovery cancellable with its owning session.
+func (c *MobileSDKClient) GetUserInfoContext(ctx context.Context) (*UserInfoResult, error) {
+	raw, err := c.CallContext(ctx, "smartlife.m.user.info.get", "1.0", nil)
 	if err != nil {
 		return nil, err
 	}

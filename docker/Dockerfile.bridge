@@ -1,10 +1,26 @@
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.26-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS source
 
 WORKDIR /src
+COPY avent-webrtc-bridge/go.mod avent-webrtc-bridge/go.sum ./
+RUN go mod download
 COPY avent-webrtc-bridge/ .
-RUN go mod download && CGO_ENABLED=0 go build -o /avent-webrtc-bridge .
+
+FROM source AS test
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    test -z "$(gofmt -l .)" && \
+    go test -race -count=1 -timeout 120s ./... && \
+    go test -race -count=20 -timeout 120s -run '^Test(Stop|Repeated|Concurrent|FailedStart|DisconnectThen|Error|Negotiation|Stale|Negotiating|MQTT|Waiter|UDP|Registration|Startup|Interleaved)' ./pkg/rtsp ./pkg/tuya ./pkg/utils && \
+    go vet ./...
+
+FROM test AS builder
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -o /avent-webrtc-bridge .
 
 FROM debian:bookworm-slim
+
+LABEL org.opencontainers.image.version="2026.8.0-local.1" \
+      org.opencontainers.image.base.source="https://github.com/thekoma/aventproxy/tree/00eb72a8d5f4d2223b9262762f0a6337ae32d337" \
+      nl.rwblokzijl.aventproxy.patch="connection-lifecycle-v1"
 
 RUN apt-get update && apt-get install -y --no-install-recommends jq ca-certificates && rm -rf /var/lib/apt/lists/*
 
