@@ -134,14 +134,14 @@ func (wb *WebRTCBridge) Start() (err error) {
 		// Mobile SDK path
 		core.Logger.Info().Msg("Using Tuya Mobile SDK API")
 
-		if err := wb.mobileClient.P2PPreLink(wb.camera.DeviceID); err != nil {
+		if err := wb.mobileClient.P2PPreLinkContext(wb.ctx, wb.camera.DeviceID); err != nil {
 			core.Logger.Warn().Err(err).Msgf(
 				"P2P pre-link failed for camera %s (non-fatal, but the WebRTC config may be refused)",
 				wb.camera.DeviceName,
 			)
 		}
 
-		webRTCConfig, err = wb.mobileClient.GetWebRTCConfig(wb.camera.DeviceID)
+		webRTCConfig, err = wb.mobileClient.GetWebRTCConfigContext(wb.ctx, wb.camera.DeviceID)
 		if err != nil {
 			return fmt.Errorf(
 				"failed to get WebRTC config for camera %s (id %s): %v",
@@ -149,13 +149,13 @@ func (wb *WebRTCBridge) Start() (err error) {
 			)
 		}
 
-		if err := wb.mobileClient.RTCSessionInit(wb.camera.DeviceID); err != nil {
+		if err := wb.mobileClient.RTCSessionInitContext(wb.ctx, wb.camera.DeviceID); err != nil {
 			core.Logger.Warn().Err(err).Msg("RTC session init failed (non-fatal)")
 		}
 
 		if wb.mqttClient == nil {
 			// No pre-set MQTT client — create one (fallback for non-managed mode)
-			userInfo, err := wb.mobileClient.GetUserInfo()
+			userInfo, err := wb.mobileClient.GetUserInfoContext(wb.ctx)
 			if err != nil {
 				return fmt.Errorf("failed to get user info: %v", err)
 			}
