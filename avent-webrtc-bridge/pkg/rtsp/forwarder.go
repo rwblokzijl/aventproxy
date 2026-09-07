@@ -249,7 +249,10 @@ func (rf *RTPForwarder) AddTCPClient(sessionID string, conn net.Conn, videoRTPCh
 func (rf *RTPForwarder) RemoveClient(sessionID string) {
 	rf.mutex.Lock()
 	defer rf.mutex.Unlock()
+	rf.removeClientLocked(sessionID)
+}
 
+func (rf *RTPForwarder) removeClientLocked(sessionID string) {
 	if client, exists := rf.clients[sessionID]; exists {
 		if client.transportMode == TransportUDP {
 			if client.videoConn != nil {
@@ -320,10 +323,10 @@ func (rf *RTPForwarder) cacheNAL(packet *rtp.Packet, nalType byte) {
 }
 
 func (rf *RTPForwarder) ForwardVideoPacket(packet *rtp.Packet) {
-	rf.mutex.RLock()
+	rf.mutex.Lock()
 
 	if len(rf.clients) == 0 {
-		rf.mutex.RUnlock()
+		rf.mutex.Unlock()
 		return
 	}
 
@@ -356,7 +359,7 @@ func (rf *RTPForwarder) ForwardVideoPacket(packet *rtp.Packet) {
 	}
 
 	rf.forwardVideoData(packet)
-	rf.mutex.RUnlock()
+	rf.mutex.Unlock()
 }
 
 func (rf *RTPForwarder) forwardVideoData(packet *rtp.Packet) {
@@ -405,14 +408,14 @@ func (rf *RTPForwarder) forwardVideoData(packet *rtp.Packet) {
 	if len(deadClients) > 0 {
 		for _, id := range deadClients {
 			core.Logger.Info().Msgf("Removing dead video client %s", id)
-			delete(rf.clients, id)
+			rf.removeClientLocked(id)
 		}
 	}
 }
 
 func (rf *RTPForwarder) ForwardAudioPacket(packet *rtp.Packet) {
-	rf.mutex.RLock()
-	defer rf.mutex.RUnlock()
+	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
 
 	if len(rf.clients) == 0 {
 		return
@@ -462,6 +465,8 @@ func (rf *RTPForwarder) ForwardAudioPacket(packet *rtp.Packet) {
 }
 
 func (rf *RTPForwarder) Stop() {
+	rf.mutex.Lock()
+	defer rf.mutex.Unlock()
 	// Reset SSRCs
 	rf.videoSSRC = 0
 	rf.audioSSRC = 1
@@ -472,7 +477,7 @@ func (rf *RTPForwarder) Stop() {
 
 	// Clear all clients
 	for sessionID := range rf.clients {
-		rf.RemoveClient(sessionID)
+		rf.removeClientLocked(sessionID)
 	}
 
 	core.Logger.Trace().Msg("RTPForwarder stopped and all clients cleared")
@@ -573,7 +578,12 @@ func (rf *RTPForwarder) sendInterleavedRTP(conn net.Conn, channel byte, rtpData 
 	// Send header + data in one write to avoid fragmentation
 	fullPacket := append(header, rtpData...)
 
+	// A disappeared browser must not hold the forwarder (and teardown) forever.
+	if err := conn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return err
+	}
 	if _, err := conn.Write(fullPacket); err != nil {
+		_ = conn.Close()
 		return err
 	}
 

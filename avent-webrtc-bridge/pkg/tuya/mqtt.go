@@ -3,10 +3,13 @@ package tuya
 import (
 	"avent-webrtc-bridge/pkg/core"
 	"avent-webrtc-bridge/pkg/utils"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -17,7 +20,9 @@ type MQTTClient struct {
 	uid            string
 	subscribeTopic string
 	cameras        map[string]*MQTTCameraClient // sessionId -> camera
-	closed         bool
+	closed         atomic.Bool
+	stopOnce       sync.Once
+	camerasMutex   sync.RWMutex
 	Connected      utils.Waiter
 }
 
@@ -69,8 +74,9 @@ func NewMqttClient(clientId, mobileMqttsUrl string, mqttConfig *MQTConfig) (*MQT
 	opts.SetCleanSession(true)
 
 	client.mqtt = mqtt.NewClient(opts)
-	if token := client.mqtt.Connect(); token.Wait() && token.Error() != nil {
-		return nil, token.Error()
+	if err := waitMQTTToken(client.mqtt.Connect(), 15*time.Second); err != nil {
+		client.Stop()
+		return nil, err
 	}
 
 	return client, nil
@@ -108,25 +114,30 @@ func NewMobileMqttClient(config *MobileMQTTConfig) (*MQTTClient, error) {
 	opts.SetTLSConfig(tlsConfig)
 
 	client.mqtt = mqtt.NewClient(opts)
-	if token := client.mqtt.Connect(); token.Wait() && token.Error() != nil {
-		return nil, token.Error()
+	if err := waitMQTTToken(client.mqtt.Connect(), 15*time.Second); err != nil {
+		client.Stop()
+		return nil, err
 	}
 
 	return client, nil
 }
 
 func (c *MQTTClient) Stop() {
-	if c.mqtt != nil {
-		c.mqtt.Disconnect(250)
-		c.closed = true
-	}
+	c.stopOnce.Do(func() {
+		c.closed.Store(true)
+		if c.mqtt != nil {
+			c.mqtt.Disconnect(250)
+		}
+	})
 }
 
 func (c *MQTTClient) IsConnected() bool {
-	return c.mqtt != nil && c.mqtt.IsConnected() && !c.closed
+	return c.mqtt != nil && c.mqtt.IsConnected() && !c.closed.Load()
 }
 
 func (c *MQTTClient) AddCameraClient(sessionId string, cameraClient *MQTTCameraClient) {
+	c.camerasMutex.Lock()
+	defer c.camerasMutex.Unlock()
 	if c.cameras == nil {
 		c.cameras = make(map[string]*MQTTCameraClient)
 	}
@@ -134,6 +145,8 @@ func (c *MQTTClient) AddCameraClient(sessionId string, cameraClient *MQTTCameraC
 }
 
 func (c *MQTTClient) RemoveCameraClient(sessionId string) {
+	c.camerasMutex.Lock()
+	defer c.camerasMutex.Unlock()
 	if c.cameras == nil {
 		return
 	}
@@ -144,8 +157,8 @@ func (c *MQTTClient) onConnect(client mqtt.Client) {
 	core.Logger.Trace().Msgf("Connected to mqtt broker")
 	core.Logger.Trace().Msgf("Subscribing to topic: %s", c.subscribeTopic)
 
-	if token := client.Subscribe(c.subscribeTopic, 1, c.consume); token.Wait() && token.Error() != nil {
-		c.Connected.Done(token.Error())
+	if err := waitMQTTToken(client.Subscribe(c.subscribeTopic, 1, c.consume), 10*time.Second); err != nil {
+		c.Connected.Done(err)
 		return
 	}
 
@@ -160,7 +173,7 @@ func (c *MQTTClient) onDisconnect(client mqtt.Client, err error) {
 		c.Connected.Done(errors.New("mqtt client disconnected"))
 	}
 
-	c.closed = true
+	c.closed.Store(true)
 }
 
 func (c *MQTTClient) consume(client mqtt.Client, msg mqtt.Message) {
@@ -171,7 +184,9 @@ func (c *MQTTClient) consume(client mqtt.Client, msg mqtt.Message) {
 	}
 
 	sessionId := rmqtt.Data.Header.SessionID
+	c.camerasMutex.RLock()
 	cameraClient, ok := c.cameras[sessionId]
+	c.camerasMutex.RUnlock()
 	if !ok {
 		core.Logger.Warn().Msgf("No camera client found for sessionId: %s", sessionId)
 		return
@@ -185,4 +200,17 @@ func (c *MQTTClient) consume(client mqtt.Client, msg mqtt.Message) {
 	case "disconnect":
 		cameraClient.onMqttDisconnect()
 	}
+}
+
+func waitMQTTToken(token mqtt.Token, timeout time.Duration) error {
+	if !token.WaitTimeout(timeout) {
+		return errors.New("MQTT acknowledgement timed out")
+	}
+	return token.Error()
+}
+
+func (c *MQTTClient) WaitConnected(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	return c.Connected.WaitContext(ctx)
 }

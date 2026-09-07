@@ -1,6 +1,7 @@
 package rtsp
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -31,6 +32,10 @@ func (m *MQTTManager) GetClient(deviceId string) (*tuya.MQTTClient, error) {
 	if client, exists := m.clients[deviceId]; exists && client.IsConnected() {
 		core.Logger.Trace().Msgf("Reusing existing MQTT client for device %s", deviceId)
 		return client, nil
+	}
+	if stale := m.clients[deviceId]; stale != nil {
+		stale.Stop()
+		delete(m.clients, deviceId)
 	}
 
 	core.Logger.Info().Msgf("Creating new MQTT client for device %s", deviceId)
@@ -82,7 +87,7 @@ func (m *MQTTManager) connect(deviceId string) (*tuya.MQTTClient, error) {
 			continue
 		}
 
-		if err = client.Connected.Wait(); err != nil {
+		if err = client.WaitConnected(context.Background()); err != nil {
 			lastErr = err
 			client.Stop()
 			core.Logger.Warn().Err(err).Msgf("MQTT handshake attempt %d/%d failed for device %s", attempt+1, len(mqttBackoffDelays), deviceId)
